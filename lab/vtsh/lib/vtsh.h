@@ -1,3 +1,3 @@
 #pragma once
-
-const char* vtsh_prompt();
+int vtsh_repl(void);
+int vtsh_run_line_or(const char* s);
