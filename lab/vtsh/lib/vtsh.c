@@ -4,9 +4,9 @@
 #include "parse.h"
 
 #include <unistd.h>
-#include <sys/wait.h> 
-
-extern int vtsh_run_argv(char **argv);
+#include <sys/wait.h>
+#include <string.h>
+#include <stdlib.h>
 
 static int is_blank(const char *s){
   if (!s) return 1;
