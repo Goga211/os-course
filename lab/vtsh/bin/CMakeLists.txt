@@ -18,3 +18,13 @@ target_compile_features(gen-join PUBLIC c_std_11)
 add_executable(io-load ${CMAKE_SOURCE_DIR}/progs/io-load.c)
 target_include_directories(io-load PRIVATE ${CMAKE_SOURCE_DIR}/lib)
 target_compile_features(io-load PUBLIC c_std_11)
+
+add_executable(cpu-factorize-mt ${CMAKE_SOURCE_DIR}/progs/cpu-factorize-mt.c)
+target_include_directories(cpu-factorize-mt PRIVATE ${CMAKE_SOURCE_DIR}/lib)
+target_compile_features(cpu-factorize-mt PUBLIC c_std_11)
+target_link_libraries(cpu-factorize-mt pthread)
+
+add_executable(ema-join-nl-mt ${CMAKE_SOURCE_DIR}/progs/ema-join-nl-mt.c)
+target_include_directories(ema-join-nl-mt PRIVATE ${CMAKE_SOURCE_DIR}/lib)
+target_link_libraries(ema-join-nl-mt PRIVATE pthread)
+target_compile_features(ema-join-nl-mt PUBLIC c_std_11)
