@@ -18,20 +18,14 @@ THREADS="$5"
 
 BIN="./build/bin/ema-join-nl-mt"
 
-echo "========================================"
-echo "      EMA JOIN (Multithreaded)"
-echo "----------------------------------------"
 echo " Left table  : $LEFT"
 echo " Right table : $RIGHT"
 echo " Output      : $OUT"
 echo " Repeat      : $REPEAT"
 echo " Threads     : $THREADS"
-echo "========================================"
 
 
-###############################################
 # 1. /usr/bin/time -v
-###############################################
 echo
 echo "=== [1] /usr/bin/time -v ==="
 
@@ -44,15 +38,12 @@ TIME_LOG="$LOG_DIR/time.txt"
     --threads "$THREADS" \
     2> "$TIME_LOG"
 
-echo "Краткое резюме:"
 grep -E "User time|System time|Elapsed|Maximum" "$TIME_LOG" || true
 
 
-###############################################
 # 2. pidstat (context switches)
-###############################################
 echo
-echo "=== [2] pidstat (context switches) ==="
+echo "[2] pidstat (context switches)"
 
 PIDSTAT_LOG="$LOG_DIR/pidstat.txt"
 
@@ -73,11 +64,9 @@ echo "Последние строки pidstat:"
 tail -n 20 "$PIDSTAT_LOG"
 
 
-###############################################
 # 3. iostat (I/O нагрузка)
-###############################################
 echo
-echo "=== [3] iostat ==="
+echo "[3] iostat"
 
 IOSTAT_LOG="$LOG_DIR/iostat.txt"
 
@@ -85,15 +74,3 @@ iostat -x 1 2 > "$IOSTAT_LOG" || true
 
 echo "Последние строки iostat:"
 tail -n 15 "$IOSTAT_LOG"
-
-
-###############################################
-# Итог
-###############################################
-echo
-echo "========================================"
-echo " Логи сохранены в:"
-echo "   $LOG_DIR/time.txt"
-echo "   $LOG_DIR/pidstat.txt"
-echo "   $LOG_DIR/iostat.txt"
-echo "========================================"
