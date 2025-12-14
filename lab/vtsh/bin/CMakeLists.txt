@@ -1,16 +1,40 @@
-add_executable(
-    vtsh
-    main.c
-)
+add_executable(vtsh main.c)
+target_include_directories(vtsh PUBLIC ${CMAKE_SOURCE_DIR}/lib)
+target_link_libraries(vtsh PRIVATE libvtsh)
+target_compile_features(vtsh PUBLIC c_std_11)
 
-target_include_directories(
-    vtsh
-    PUBLIC
-    .
-)
+add_executable(cpu-factorize ${CMAKE_SOURCE_DIR}/progs/cpu-factorize.c)
+target_include_directories(cpu-factorize PRIVATE ${CMAKE_SOURCE_DIR}/lib)
+target_compile_features(cpu-factorize PUBLIC c_std_11)
+target_compile_options(cpu-factorize PRIVATE -O3)
 
-target_link_libraries(
-    vtsh
-    PRIVATE
-    libvtsh
-)
+add_executable(ema-join-nl ${CMAKE_SOURCE_DIR}/progs/ema-join-nl.c)
+target_include_directories(ema-join-nl PRIVATE ${CMAKE_SOURCE_DIR}/lib)
+target_compile_features(ema-join-nl PUBLIC c_std_11)
+target_compile_options(ema-join-nl PRIVATE -O3)
+
+add_executable(gen-join ${CMAKE_SOURCE_DIR}/progs/gen-join.c)
+target_include_directories(gen-join PRIVATE ${CMAKE_SOURCE_DIR}/lib)
+target_compile_features(gen-join PUBLIC c_std_11)
+
+add_executable(io-load ${CMAKE_SOURCE_DIR}/progs/io-load.c)
+target_include_directories(io-load PRIVATE ${CMAKE_SOURCE_DIR}/lib)
+target_compile_features(io-load PUBLIC c_std_11)
+target_compile_options(io-load PRIVATE -O3)
+
+add_executable(cpu-factorize-mt ${CMAKE_SOURCE_DIR}/progs/cpu-factorize-mt.c)
+target_include_directories(cpu-factorize-mt PRIVATE ${CMAKE_SOURCE_DIR}/lib)
+target_compile_features(cpu-factorize-mt PUBLIC c_std_11)
+target_link_libraries(cpu-factorize-mt pthread)
+target_compile_options(cpu-factorize-mt PRIVATE -O3)
+
+add_executable(ema-join-nl-mt ${CMAKE_SOURCE_DIR}/progs/ema-join-nl-mt.c)
+target_include_directories(ema-join-nl-mt PRIVATE ${CMAKE_SOURCE_DIR}/lib)
+target_link_libraries(ema-join-nl-mt PRIVATE pthread)
+target_compile_features(ema-join-nl-mt PUBLIC c_std_11)
+
+add_executable(io-load-mt ${CMAKE_SOURCE_DIR}/progs/io-load-mt.c)
+target_include_directories(io-load-mt PRIVATE ${CMAKE_SOURCE_DIR}/lib)
+target_compile_features(io-load-mt PUBLIC c_std_11)
+target_link_libraries(io-load-mt PRIVATE pthread)
+target_compile_options(io-load-mt PRIVATE -O3)
