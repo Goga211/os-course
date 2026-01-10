@@ -8,13 +8,17 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <stdio.h>   // +++
+
+static uint64_t g_read_ops = 0, g_write_ops = 0;
+static uint64_t g_read_bytes = 0, g_write_bytes = 0;
 
 #ifndef VTPC_BLOCK_SIZE
 #define VTPC_BLOCK_SIZE 4096
 #endif
 
 #ifndef VTPC_DEFAULT_CACHE_PAGES
-#define VTPC_DEFAULT_CACHE_PAGES 128
+#define VTPC_DEFAULT_CACHE_PAGES 8192
 #endif
 
 #ifndef VTPC_MAX_HANDLES
@@ -107,7 +111,7 @@ static inline uint64_t mix64(uint64_t x) {
   x ^= x >> 33;
   return x;
 }
-
+  
 static inline size_t hash_key(dev_t dev, ino_t ino, off_t block_no) {
   uint64_t x = (uint64_t)dev;
   x = mix64(x ^ (uint64_t)ino);
@@ -301,6 +305,32 @@ static cache_entry_t* alloc_entry(void) {
   return victim;
 }
 
+static void prefetch_block_nostat(file_state_t* st, off_t block_no) {
+  if (hash_find(st->dev, st->ino, block_no)) return;
+
+  off_t off = (off_t)(block_no * (off_t)g_block_size);
+  if (off >= st->logical_size) return;
+
+  cache_entry_t* e = alloc_entry();
+  if (!e) return;
+
+  e->valid = 1;
+  e->dirty = 0;
+  e->dev = st->dev;
+  e->ino = st->ino;
+  e->block_no = block_no;
+
+  if (read_full_block(st->os_fd, e->data, g_block_size, off) < 0) {
+    free_push(e);
+    return;
+  }
+
+  hash_insert(e);
+
+  lru_push_front(e);
+}
+
+
 static cache_entry_t* get_block(file_state_t* st, off_t block_no, int need_load) {
   cache_entry_t* e = hash_find(st->dev, st->ino, block_no);
   if (e) {
@@ -330,9 +360,15 @@ static cache_entry_t* get_block(file_state_t* st, off_t block_no, int need_load)
     memset(e->data, 0, g_block_size);
   }
 
-  hash_insert(e);
+    hash_insert(e);
   lru_push_front(e);
+
+  if (need_load && g_cache_pages >= 2) {
+    prefetch_block_nostat(st, block_no + 1);
+  }
+
   return e;
+
 }
 
 static void invalidate_all_for_state(file_state_t* st) {
@@ -366,6 +402,25 @@ static int flush_all_for_state(file_state_t* st, int force_sync) {
 }
 
 /* ---------------- Init ---------------- */
+static void vtpc_dump_stats_atexit(void) {
+  const char* on = getenv("VTPC_PRINT_STATS");
+  if (!on || !on[0] || strcmp(on, "0") == 0) return;
+
+  uint64_t hits = g_cache_hits, miss = g_cache_misses;
+  double hr = (hits + miss) ? (100.0 * (double)hits / (double)(hits + miss)) : 0.0;
+
+  fprintf(stderr,
+    "[vtpc-stats] hits=%llu misses=%llu hitrate=%.2f%% read_ops=%llu write_ops=%llu read_bytes=%llu write_bytes=%llu\n",
+    (unsigned long long)hits,
+    (unsigned long long)miss,
+    hr,
+    (unsigned long long)g_read_ops,
+    (unsigned long long)g_write_ops,
+    (unsigned long long)g_read_bytes,
+    (unsigned long long)g_write_bytes
+  );
+}
+
 
 static int ensure_init(void) {
   if (g_inited) return 0;
@@ -389,6 +444,7 @@ static int ensure_init(void) {
   memset(g_states, 0, sizeof(g_states));
 
   g_inited = 1;
+  atexit(vtpc_dump_stats_atexit);
   return 0;
 }
 
@@ -530,6 +586,8 @@ ssize_t vtpc_read(int fd, void* buf, size_t count) {
   }
 
   g_handles[fd].pos = pos;
+  g_read_ops++;
+  g_read_bytes += (uint64_t)done;
   return (ssize_t)done;
 }
 
@@ -570,6 +628,8 @@ ssize_t vtpc_write(int fd, const void* buf, size_t count) {
   }
 
   g_handles[fd].pos = pos;
+  g_write_ops++;
+  g_write_bytes += (uint64_t)done;
   return (ssize_t)done;
 }
 
