@@ -1,13 +1,23 @@
+#ifndef _FILE_OFFSET_BITS
+#define _FILE_OFFSET_BITS 64
+#endif
+
+#include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "common.h"
 
-#ifndef _FILE_OFFSET_BITS
-#define _FILE_OFFSET_BITS 64
+#ifdef USE_VTPC
+#include "vtpc.h"
 #endif
 
 typedef enum { MODE_READ, MODE_WRITE } rw_mode_t;
@@ -43,7 +53,7 @@ static void usage(const char* prog) {
   );
 }
 
-static int parse_range(const char* s, off_t* lo, off_t* hi) {
+static int parse_range(char* s, off_t* lo, off_t* hi) {
   if (!s) {
     *lo = 0;
     *hi = 0;
@@ -53,14 +63,17 @@ static int parse_range(const char* s, off_t* lo, off_t* hi) {
   if (!dash)
     return -1;
   *dash = '\0';
+
   errno = 0;
   long long a = strtoll(s, NULL, 10);
   if (errno)
     return -1;
+
   errno = 0;
   long long b = strtoll(dash + 1, NULL, 10);
   if (errno || a < 0 || b < 0)
     return -1;
+
   *lo = (off_t)a;
   *hi = (off_t)b;
   return 0;
@@ -159,12 +172,56 @@ static inline off_t align_down(off_t x, off_t a) {
   return (x / a) * a;
 }
 
+#ifdef USE_VTPC
+
+static int io_open(const char* path, int oflags, mode_t omode) {
+  return vtpc_open(path, oflags, (int)omode);
+}
+
+static int io_close(int fd) {
+  return vtpc_close(fd);
+}
+
+static ssize_t io_pread(int fd, void* buf, size_t count, off_t off) {
+  if (vtpc_lseek(fd, off, SEEK_SET) == (off_t)-1)
+    return -1;
+  return vtpc_read(fd, buf, count);
+}
+
+static ssize_t io_pwrite(int fd, const void* buf, size_t count, off_t off) {
+  if (vtpc_lseek(fd, off, SEEK_SET) == (off_t)-1)
+    return -1;
+  return vtpc_write(fd, buf, count);
+}
+
+#else
+
+static int io_open(const char* path, int oflags, mode_t omode) {
+  return open(path, oflags, omode);
+}
+
+static int io_close(int fd) {
+  return close(fd);
+}
+
+static ssize_t io_pread(int fd, void* buf, size_t count, off_t off) {
+  return pread(fd, buf, count, off);
+}
+
+static ssize_t io_pwrite(int fd, const void* buf, size_t count, off_t off) {
+  return pwrite(fd, buf, count, off);
+}
+
+#endif
+
 int main(int argc, char** argv) {
   args_t A;
   parse_args(argc, argv, &A);
   srandom(A.seed);
 
   const size_t ALIGN = 4096;
+
+#ifndef USE_VTPC
   if (A.direct) {
     if (A.block_size % ALIGN) {
       fprintf(stderr, "O_DIRECT: block_size must be multiple of %zu\n", ALIGN);
@@ -179,35 +236,27 @@ int main(int argc, char** argv) {
       return 2;
     }
   }
-
-  int oflags = 0;
-  mode_t omode = 0644;
-  if (A.rw == MODE_READ) {
-    oflags = O_RDONLY;
-  } else {
-    oflags = O_WRONLY | O_CREAT;
-  }
-  if (A.direct)
-    oflags |= O_DIRECT;
-
-  int fd = open(A.file_path, oflags, omode);
-  if (fd < 0)
-    DIE("open(%s): %s", A.file_path, strerror(errno));
+#endif
 
   struct stat st;
   memset(&st, 0, sizeof(st));
-  if (fstat(fd, &st) != 0)
-    DIE("fstat: %s", strerror(errno));
+  if (stat(A.file_path, &st) != 0) {
+    if (A.rw == MODE_READ)
+      DIE("stat(%s): %s", A.file_path, strerror(errno));
+    st.st_size = 0;
+  }
   off_t file_size = st.st_size;
 
   off_t lo = A.range_lo;
   off_t hi = A.range_hi;
 
+#ifndef USE_VTPC
   if (A.direct) {
     lo = align_down(lo, (off_t)ALIGN);
     if (hi)
       hi = align_down(hi, (off_t)ALIGN);
   }
+#endif
 
   if (A.rw == MODE_READ) {
     if (hi == 0)
@@ -219,7 +268,6 @@ int main(int argc, char** argv) {
           (long long)lo,
           (long long)hi
       );
-      close(fd);
       return 2;
     }
   } else {
@@ -230,24 +278,43 @@ int main(int argc, char** argv) {
           (long long)lo,
           (long long)hi
       );
-      close(fd);
       return 2;
     }
+
     if (hi && hi > file_size) {
-      if (ftruncate(fd, hi) != 0)
-        DIE("ftruncate: %s", strerror(errno));
+      if (truncate(A.file_path, hi) != 0)
+        DIE("truncate: %s", strerror(errno));
       file_size = hi;
     }
   }
+
+  int oflags = (A.rw == MODE_READ) ? O_RDONLY : (O_WRONLY | O_CREAT);
+#ifndef USE_VTPC
+  if (A.direct)
+    oflags |= O_DIRECT;
+#else
+  (void)A.direct;
+#endif
+
+  mode_t omode = 0644;
+  int fd = io_open(A.file_path, oflags, omode);
+  if (fd < 0)
+    DIE("open(%s): %s", A.file_path, strerror(errno));
 
   off_t usable_bytes = (hi > lo && hi > 0) ? (hi - lo) : 0;
   long slots_in_range =
       (hi > 0) ? (long)(usable_bytes / (off_t)A.block_size) : -1;
 
   void* buf = NULL;
+#ifndef USE_VTPC
   int rc = posix_memalign(&buf, A.direct ? ALIGN : sizeof(void*), A.block_size);
   if (rc != 0 || !buf)
     DIE("posix_memalign");
+#else
+  buf = malloc(A.block_size);
+  if (!buf)
+    DIE("malloc");
+#endif
 
   for (size_t i = 0; i < A.block_size; ++i)
     ((unsigned char*)buf)[i] = (unsigned char)(i * 131u + 7u);
@@ -281,12 +348,12 @@ int main(int argc, char** argv) {
         }
       }
 
-      ssize_t n = 0;
-      if (A.rw == MODE_READ) {
-        n = pread(fd, buf, A.block_size, base);
-      } else {
-        n = pwrite(fd, buf, A.block_size, base);
-      }
+      ssize_t n;
+      if (A.rw == MODE_READ)
+        n = io_pread(fd, buf, A.block_size, base);
+      else
+        n = io_pwrite(fd, buf, A.block_size, base);
+
       if (n < 0) {
         fprintf(
             stderr,
@@ -295,12 +362,13 @@ int main(int argc, char** argv) {
             strerror(errno)
         );
         free(buf);
-        close(fd);
+        io_close(fd);
         return 1;
       }
-      if (A.rw == MODE_READ && n == 0) {
+
+      if (A.rw == MODE_READ && n == 0)
         break;
-      }
+
       if ((size_t)n < A.block_size) {
         fprintf(
             stderr,
@@ -311,9 +379,10 @@ int main(int argc, char** argv) {
             (long long)base
         );
         free(buf);
-        close(fd);
+        io_close(fd);
         return 1;
       }
+
       ops++;
       bytes += n;
     }
@@ -325,11 +394,22 @@ int main(int argc, char** argv) {
   double bw = (ms > 0) ? (mib / (ms / 1000.0)) : 0.0;
   double iops = (ms > 0) ? (ops / (ms / 1000.0)) : 0.0;
 
+#ifdef USE_VTPC
+  uint64_t hits = vtpc_cache_hits();
+  uint64_t misses = vtpc_cache_misses();
+  double hitrate =
+      (hits + misses) ? (100.0 * (double)hits / (double)(hits + misses)) : 0.0;
+#endif
+
   fprintf(
       stderr,
       "[io-load] rw=%s type=%s direct=%s bs=%zu bc=%ld file=%s range=%lld-%lld "
       "repeat=%ld seed=%u => bytes=%lld ops=%lld time=%.3f ms, BW=%.2f MiB/s, "
-      "IOPS=%.0f\n",
+      "IOPS=%.0f"
+#ifdef USE_VTPC
+      " | cache: hits=%llu misses=%llu hitrate=%.2f%%"
+#endif
+      "\n",
       (A.rw == MODE_READ ? "read" : "write"),
       (A.pick == PICK_SEQ ? "sequence" : "random"),
       (A.direct ? "on" : "off"),
@@ -345,9 +425,15 @@ int main(int argc, char** argv) {
       ms,
       bw,
       iops
+#ifdef USE_VTPC
+      ,
+      (unsigned long long)hits,
+      (unsigned long long)misses,
+      hitrate
+#endif
   );
 
   free(buf);
-  close(fd);
+  io_close(fd);
   return 0;
 }

@@ -8,7 +8,11 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <stdio.h>   // +++
+#include <stdio.h> 
+#include <sys/sdt.h> // for eBPF
+#include <sys/types.h>
+
+
 
 static uint64_t g_read_ops = 0, g_write_ops = 0;
 static uint64_t g_read_bytes = 0, g_write_bytes = 0;
@@ -40,8 +44,8 @@ typedef struct {
   dev_t dev;
   ino_t ino;
 
-  int   os_fd;       // opened with O_DIRECT
-  int   open_flags;  // real flags used for os_fd
+  int   os_fd;
+  int   open_flags;
 
   int   refcnt;
   off_t logical_size;
@@ -51,7 +55,7 @@ typedef struct {
   int used;
   file_state_t* st;
   off_t pos;
-  int user_flags; // flags requested by user (not forced upgrades)
+  int user_flags;
 } handle_t;
 
 struct cache_entry {
@@ -64,20 +68,15 @@ struct cache_entry {
 
   unsigned char* data;
 
-  cache_entry_t* prev;   // LRU
-  cache_entry_t* next;   // LRU
-  cache_entry_t* hnext;  // hash chain
+  cache_entry_t* prev;
+  cache_entry_t* next;
+  cache_entry_t* hnext;
 };
 
-/* ---------------- Global state ---------------- */
 
 static int    g_inited     = 0;
 static size_t g_block_size = VTPC_BLOCK_SIZE;
 static size_t g_cache_pages = VTPC_DEFAULT_CACHE_PAGES;
-
-// metrics (kept)
-static uint64_t g_cache_hits   = 0;
-static uint64_t g_cache_misses = 0;
 
 static handle_t     g_handles[VTPC_MAX_HANDLES];
 static file_state_t g_states[VTPC_MAX_FILE_STATES];
@@ -88,7 +87,8 @@ static cache_entry_t* g_lru_head  = NULL;
 static cache_entry_t* g_lru_tail  = NULL;
 static cache_entry_t* g_hash[VTPC_HASH_SIZE];
 
-/* ---------------- Small helpers ---------------- */
+#define VTPC_USDT_HIT()  DTRACE_PROBE(vtpc_ebpf, cache_hit)
+#define VTPC_USDT_MISS() DTRACE_PROBE(vtpc_ebpf, cache_miss)
 
 static inline int accmode(int flags) { return flags & O_ACCMODE; }
 static inline int can_write_flags(int flags) { return accmode(flags) != O_RDONLY; }
@@ -101,7 +101,6 @@ static inline int validate_fd(int fd) {
   return 0;
 }
 
-/* ---------------- Hashing ---------------- */
 
 static inline uint64_t mix64(uint64_t x) {
   x ^= x >> 33;
@@ -149,7 +148,6 @@ static void hash_remove(cache_entry_t* e) {
   }
 }
 
-/* ---------------- LRU ---------------- */
 
 static void lru_remove(cache_entry_t* e) {
   if (!e) return;
@@ -176,7 +174,6 @@ static void lru_touch(cache_entry_t* e) {
   lru_push_front(e);
 }
 
-/* ---------------- Low-level I/O ---------------- */
 
 static int write_full(int fd, const void* buf, size_t count, off_t off) {
   const unsigned char* p = (const unsigned char*)buf;
@@ -209,7 +206,6 @@ static int read_full_block(int fd, void* buf, size_t block_size, off_t off) {
   return 0;
 }
 
-/* ---------------- File states/handles ---------------- */
 
 static file_state_t* find_state(dev_t dev, ino_t ino) {
   for (int i = 0; i < VTPC_MAX_FILE_STATES; i++)
@@ -245,7 +241,6 @@ static int alloc_handle(file_state_t* st, int user_flags) {
   return -1;
 }
 
-/* ---------------- Cache entries ---------------- */
 
 static void free_push(cache_entry_t* e) {
   e->valid = 0;
@@ -287,7 +282,6 @@ static cache_entry_t* alloc_entry(void) {
     return e;
   }
 
-  // evict LRU tail
   cache_entry_t* victim = g_lru_tail;
   if (!victim) { errno = ENOMEM; return NULL; }
 
@@ -334,12 +328,12 @@ static void prefetch_block_nostat(file_state_t* st, off_t block_no) {
 static cache_entry_t* get_block(file_state_t* st, off_t block_no, int need_load) {
   cache_entry_t* e = hash_find(st->dev, st->ino, block_no);
   if (e) {
-    g_cache_hits++;
+    VTPC_USDT_HIT();     // hit ebpf
     lru_touch(e);
     return e;
   }
 
-  g_cache_misses++;
+  VTPC_USDT_MISS();      // <<< miss ebpf
 
   e = alloc_entry();
   if (!e) return NULL;
@@ -401,25 +395,19 @@ static int flush_all_for_state(file_state_t* st, int force_sync) {
   return 0;
 }
 
-/* ---------------- Init ---------------- */
 static void vtpc_dump_stats_atexit(void) {
   const char* on = getenv("VTPC_PRINT_STATS");
   if (!on || !on[0] || strcmp(on, "0") == 0) return;
 
-  uint64_t hits = g_cache_hits, miss = g_cache_misses;
-  double hr = (hits + miss) ? (100.0 * (double)hits / (double)(hits + miss)) : 0.0;
-
   fprintf(stderr,
-    "[vtpc-stats] hits=%llu misses=%llu hitrate=%.2f%% read_ops=%llu write_ops=%llu read_bytes=%llu write_bytes=%llu\n",
-    (unsigned long long)hits,
-    (unsigned long long)miss,
-    hr,
+    "[vtpc-stats] read_ops=%llu write_ops=%llu read_bytes=%llu write_bytes=%llu\n",
     (unsigned long long)g_read_ops,
     (unsigned long long)g_write_ops,
     (unsigned long long)g_read_bytes,
     (unsigned long long)g_write_bytes
   );
 }
+
 
 
 static int ensure_init(void) {
@@ -448,7 +436,6 @@ static int ensure_init(void) {
   return 0;
 }
 
-/* ---------------- Public API ---------------- */
 
 int vtpc_open(const char* path, int mode, int access) {
   if (!path) { errno = EINVAL; return -1; }
@@ -456,7 +443,6 @@ int vtpc_open(const char* path, int mode, int access) {
 
   int user_flags = mode;
 
-  // need read-modify-write for partial blocks => upgrade O_WRONLY to O_RDWR
   int real_mode = mode;
   if (accmode(real_mode) == O_WRONLY)
     real_mode = (real_mode & ~O_ACCMODE) | O_RDWR;
@@ -481,7 +467,6 @@ int vtpc_open(const char* path, int mode, int access) {
     st->open_flags = real_mode;
     st->logical_size = sb.st_size;
   } else {
-    // Upgrade underlying fd to write-capable if needed
     if (!can_write_flags(st->open_flags) && can_write_flags(real_mode)) {
       close(st->os_fd);
       st->os_fd = os_fd;
@@ -517,7 +502,6 @@ int vtpc_close(int fd) {
 
   if (!st || !st->used) { errno = EBADF; return -1; }
 
-  // flush if there were writes; no forced fsync/truncate here
   if (flush_all_for_state(st, 0) < 0) return -1;
 
   if (--st->refcnt <= 0) {
@@ -638,7 +622,6 @@ int vtpc_fsync(int fd) {
   return flush_all_for_state(g_handles[fd].st, 1);
 }
 
-/* ---- Metrics (kept) ---- */
-uint64_t vtpc_cache_hits(void)   { return g_cache_hits; }
-uint64_t vtpc_cache_misses(void) { return g_cache_misses; }
-void vtpc_cache_reset_stats(void) { g_cache_hits = g_cache_misses = 0; }
+uint64_t vtpc_cache_hits(void)   { return 0; }
+uint64_t vtpc_cache_misses(void) { return 0; }
+void vtpc_cache_reset_stats(void) {}
